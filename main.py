@@ -25,10 +25,10 @@ def health():
 @app.post("/score")
 def score_endpoint(payload: Features):
     try:
-        # llamar a tu función existente (sin modificarla)
+        # llamar a función de predicción
         result = pred_funct(model, **payload.features)
 
-        # usamos raw_output porque tu modelo es binary:logistic
+        # usamos raw_output porque el modelo es binary:logistic
         return {
             "probability": result["raw_output"],
             "raw_output": result["raw_output"],
