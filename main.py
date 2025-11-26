@@ -1,20 +1,24 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+# main.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from typing import Dict, Any
 import xgboost as xgb
-from predict_function import pred_funct
 import pandas as pd
+
+from predict_function import pred_funct
 
 app = FastAPI(title="Scoring API")
 
-# cargar modelo UNA única vez
+# Cargamos modelo
 model = xgb.Booster()
 model.load_model("model.json")
 
+if not model.feature_names:
+    raise RuntimeError("El modelo no tiene feature_names definidos.")
 
-# ---- Modelo del request ----
+
 class Features(BaseModel):
-    features: Dict[str, Any]
+    features: Dict[str, Any] = Field(..., min_items=1)
 
 
 @app.get("/")
@@ -24,49 +28,96 @@ def health():
 
 @app.post("/score")
 def score_endpoint(payload: Features):
+    """
+    Endpoint principal de scoring.
+    Maneja:
+    - datos faltantes
+    - tipos incorrectos
+    - valores NaN/Inf
+    """
     try:
-        # llamar a función de predicción
         result = pred_funct(model, **payload.features)
 
-        # usamos raw_output porque el modelo es binary:logistic
+        raw_output = result["raw_output"]
+        prob_sigmoid = result["prob_sigmoid"]
+
+        # Validación simple rango prob
+        if not (0.0 <= raw_output <= 1.0):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Salida del modelo fuera de rango [0,1]: {raw_output}"
+            )
+
         return {
-            "probability": result["raw_output"],
-            "raw_output": result["raw_output"],
-            "prob_sigmoid": result["prob_sigmoid"],
-            "status": "success"
+            "status": "success",
+            "probability": raw_output,     # esta es la que usaría el motor
+            "raw_output": raw_output,
+            "prob_sigmoid": prob_sigmoid,
         }
 
+    except ValueError as e:
+        # Errores de datos: faltantes, tipo, NaN, etc.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except KeyError as e:
+        # Por si algo en pred_funct levanta KeyError
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error en nombres de features: {str(e)}"
+        )
+
+    except HTTPException:
+        # Re-lanzamos si ya construimos una HTTPException arriba
+        raise
+
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        # Cualquier otra cosa inesperada
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno en scoring: {str(e)}"
+        )
 
 
-# ---- Test usando los casos del archivo 'muestra' ----
+# ---- Ejemplo de test con muestra, también con manejo de errores ----
 
 @app.get("/test_muestra/{case}")
 def test_muestra(case: int):
-    df = pd.read_parquet("muestra")
+    """
+    Usa el archivo 'muestra' para probar casos.
+    Solo índices válidos.
+    """
+    try:
+        df = pd.read_parquet("muestra")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo leer el archivo 'muestra': {str(e)}"
+        )
 
-    # Validar rango permitido
-    if case < 0 or case > 19:
-        return {
-            "status": "error",
-            "message": "Solo se permiten casos entre 0 y 19."
-        }
+    if case < 0 or case >= len(df):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Case fuera de rango. Debe estar entre 0 y {len(df)-1}."
+        )
 
-    # Validar que la muestra tenga suficientes filas
-    if case >= len(df):
-        return {
-            "status": "error",
-            "message": f"La muestra solo tiene {len(df)} filas."
-        }
-
-    # Seleccionar la fila solicitada
     row = df.iloc[case].to_dict()
-    result = pred_funct(model, **row)
 
-    return {
-        "status": "success",
-        "case": case,
-        "probability": result["raw_output"],
-        "used_row": row
-    }
+    try:
+        result = pred_funct(model, **row)
+        raw_output = result["raw_output"]
+
+        return {
+            "status": "success",
+            "case": case,
+            "probability": raw_output,
+            "used_row": row
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno calculando test_muestra: {str(e)}"
+        )
+# --- END OF FILE ---
